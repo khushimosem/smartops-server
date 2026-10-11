@@ -80,10 +80,12 @@ def log_event():
 
 
 @app.route("/data", methods=["GET"])
+
 def get_data():
     try:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Latest event for each table
                 cur.execute(
                     """
                     SELECT DISTINCT ON (table_id)
@@ -94,32 +96,38 @@ def get_data():
                 )
                 rows = cur.fetchall()
 
+                # Total customer calls
                 cur.execute(
                     """
                     SELECT COUNT(*) AS total
                     FROM logs
-                    WHERE event = %s
+                    WHERE event LIKE %s
                     """,
-                    ("Customer_Called",)
+                    ("Customer_Called%",)
                 )
                 total_calls = cur.fetchone()["total"]
+
+                # All events, in chronological order, for timing calculations
+                cur.execute(
+                    """
+                    SELECT table_id, event, created_at
+                    FROM logs
+                    ORDER BY table_id, created_at ASC, id ASC
+                    """
+                )
+                events = cur.fetchall()
 
         live_status = []
         open_calls = 0
 
         for row in rows:
             created_at = row["created_at"]
-
-            if created_at.tzinfo:
-                minutes_ago = int(
-                    (
-                        datetime.now(created_at.tzinfo) - created_at
-                    ).total_seconds() / 60
-                )
-            else:
-                minutes_ago = int(
-                    (datetime.now() - created_at).total_seconds() / 60
-                )
+            now = (
+                datetime.now(created_at.tzinfo)
+                if created_at.tzinfo
+                else datetime.now()
+            )
+            minutes_ago = int((now - created_at).total_seconds() / 60)
 
             live_status.append({
                 "table_id": row["table_id"],
@@ -127,14 +135,57 @@ def get_data():
                 "minutes_ago": max(0, minutes_ago)
             })
 
-            if row["event"] != "Table_Closed":
+            if not row["event"].startswith("Table_Closed"):
                 open_calls += 1
+
+        response_times = []
+        delivery_times = []
+        pending_call = {}
+        pending_response = {}
+
+        for item in events:
+            table_id = item["table_id"]
+            event = item["event"]
+            timestamp = item["created_at"]
+
+            if event.startswith("Customer_Called"):
+                pending_call[table_id] = timestamp
+
+            elif event.startswith("Waiter_Responded"):
+                call_time = pending_call.pop(table_id, None)
+                if call_time is not None:
+                    seconds = (timestamp - call_time).total_seconds()
+                    if seconds >= 0:
+                        response_times.append(seconds)
+                pending_response[table_id] = timestamp
+
+            elif event.startswith("Food_Delivered"):
+                response_time = pending_response.pop(table_id, None)
+                if response_time is not None:
+                    seconds = (timestamp - response_time).total_seconds()
+                    if seconds >= 0:
+                        delivery_times.append(seconds)
+
+            elif event.startswith("Table_Closed"):
+                pending_call.pop(table_id, None)
+                pending_response.pop(table_id, None)
+
+        avg_response = (
+            round(sum(response_times) / len(response_times), 1)
+            if response_times else None
+        )
+        avg_delivery = (
+            round(sum(delivery_times) / len(delivery_times), 1)
+            if delivery_times else None
+        )
 
         return jsonify({
             "live_status": live_status,
             "analytics": {
                 "total": total_calls,
-                "open": open_calls
+                "open": open_calls,
+                "avg_response_seconds": avg_response,
+                "avg_delivery_seconds": avg_delivery
             }
         }), 200
 
