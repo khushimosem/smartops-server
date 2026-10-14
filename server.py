@@ -2,7 +2,7 @@
 import os
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -13,14 +13,21 @@ app = Flask(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
+# ==========================================
+# DATABASE CONNECTION
+# ==========================================
+
 def get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
     return psycopg2.connect(DATABASE_URL)
 
 
+# ==========================================
+# HISTORY FILTERS
+# ==========================================
+
 def get_history_filters():
-    """Build safe filters for history and CSV export."""
     conditions = []
     params = []
 
@@ -47,6 +54,10 @@ def get_history_filters():
 
     return where_clause, params
 
+
+# ==========================================
+# RECEIVE ESP8266 EVENTS
+# ==========================================
 
 @app.route("/log", methods=["POST"])
 def log_event():
@@ -79,55 +90,81 @@ def log_event():
         return jsonify({"error": "Failed to save event"}), 500
 
 
-@app.route("/data", methods=["GET"])
+# ==========================================
+# DASHBOARD AND MONITOR DATA
+# ==========================================
 
+@app.route("/data", methods=["GET"])
 def get_data():
     try:
         with get_db_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Latest event for each table
-                cur.execute(
-                    """
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cur:
+
+                # 1. Latest event for each table.
+                # Keep the latest status across all dates.
+                cur.execute("""
                     SELECT DISTINCT ON (table_id)
                         table_id, event, icon, event_time, created_at
                     FROM logs
                     ORDER BY table_id, created_at DESC, id DESC
-                    """
-                )
+                """)
                 rows = cur.fetchall()
 
-                # Total customer calls
-                cur.execute(
-                    """
+                # 2. Today's customer calls in IST.
+                # created_at is assumed to contain UTC timestamps
+                # stored without a timezone.
+                cur.execute("""
                     SELECT COUNT(*) AS total
                     FROM logs
-                    WHERE event LIKE %s
-                    """,
-                    ("Customer_Called%",)
-                )
+                    WHERE event LIKE 'Customer_Called%'
+                      AND created_at >= (
+                          (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                          ::date::timestamp - INTERVAL '5 hours 30 minutes'
+                      )
+                      AND created_at < (
+                          ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                           ::date + 1)::timestamp
+                          - INTERVAL '5 hours 30 minutes'
+                      )
+                """)
                 total_calls = cur.fetchone()["total"]
 
-                # All events, in chronological order, for timing calculations
-                cur.execute(
-                    """
+                # 3. Today's events for response/delivery averages.
+                cur.execute("""
                     SELECT table_id, event, created_at
                     FROM logs
+                    WHERE created_at >= (
+                          (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                          ::date::timestamp - INTERVAL '5 hours 30 minutes'
+                      )
+                      AND created_at < (
+                          ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                           ::date + 1)::timestamp
+                          - INTERVAL '5 hours 30 minutes'
+                      )
                     ORDER BY table_id, created_at ASC, id ASC
-                    """
-                )
+                """)
                 events = cur.fetchall()
 
+        # 4. Current table status and age of latest event.
         live_status = []
         open_calls = 0
 
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
         for row in rows:
             created_at = row["created_at"]
-            now = (
-                datetime.now(created_at.tzinfo)
-                if created_at.tzinfo
-                else datetime.now()
+
+            if created_at.tzinfo is not None:
+                created_at = created_at.astimezone(
+                    timezone.utc
+                ).replace(tzinfo=None)
+
+            minutes_ago = int(
+                (now_utc - created_at).total_seconds() / 60
             )
-            minutes_ago = int((now - created_at).total_seconds() / 60)
 
             live_status.append({
                 "table_id": row["table_id"],
@@ -135,9 +172,10 @@ def get_data():
                 "minutes_ago": max(0, minutes_ago)
             })
 
-            if not row["event"].startswith("Table_Closed"):
+            if not str(row["event"]).startswith("Table_Closed"):
                 open_calls += 1
 
+        # 5. Calculate today's average response/delivery times.
         response_times = []
         delivery_times = []
         pending_call = {}
@@ -153,16 +191,27 @@ def get_data():
 
             elif event.startswith("Waiter_Responded"):
                 call_time = pending_call.pop(table_id, None)
+
                 if call_time is not None:
-                    seconds = (timestamp - call_time).total_seconds()
+                    seconds = (
+                        timestamp - call_time
+                    ).total_seconds()
+
                     if seconds >= 0:
                         response_times.append(seconds)
+
                 pending_response[table_id] = timestamp
 
             elif event.startswith("Food_Delivered"):
-                response_time = pending_response.pop(table_id, None)
+                response_time = pending_response.pop(
+                    table_id, None
+                )
+
                 if response_time is not None:
-                    seconds = (timestamp - response_time).total_seconds()
+                    seconds = (
+                        timestamp - response_time
+                    ).total_seconds()
+
                     if seconds >= 0:
                         delivery_times.append(seconds)
 
@@ -174,6 +223,7 @@ def get_data():
             round(sum(response_times) / len(response_times), 1)
             if response_times else None
         )
+
         avg_delivery = (
             round(sum(delivery_times) / len(delivery_times), 1)
             if delivery_times else None
@@ -194,13 +244,12 @@ def get_data():
         return jsonify({"error": "Failed to read events"}), 500
 
 
+# ==========================================
+# HISTORICAL EVENT LOGS
+# ==========================================
+
 @app.route("/history", methods=["GET"])
 def get_history():
-    """
-    Retrieve stored event records.
-    Optional filters: table_id, event.
-    Pagination: limit and offset.
-    """
     try:
         where_clause, params = get_history_filters()
 
@@ -218,7 +267,10 @@ def get_history():
             }), 400
 
         with get_db_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cur:
+
                 cur.execute(
                     "SELECT COUNT(*) AS total FROM logs" + where_clause,
                     params
@@ -232,12 +284,16 @@ def get_history():
                     FROM logs
                     """
                     + where_clause
-                    + " ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
+                    + """
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s OFFSET %s
+                    """,
                     params + [limit, offset]
                 )
                 rows = cur.fetchall()
 
         history = []
+
         for row in rows:
             history.append({
                 "id": row["id"],
@@ -261,19 +317,25 @@ def get_history():
 
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
     except Exception:
         app.logger.exception("Failed to retrieve event history")
         return jsonify({"error": "Failed to retrieve event history"}), 500
 
 
+# ==========================================
+# EXPORT HISTORICAL LOGS TO CSV
+# ==========================================
+
 @app.route("/history.csv", methods=["GET"])
 def export_history_csv():
-    """Export all matching history records to a CSV file."""
     try:
         where_clause, params = get_history_filters()
 
         with get_db_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cur:
                 cur.execute(
                     """
                     SELECT id, created_at, table_id, event,
@@ -316,10 +378,15 @@ def export_history_csv():
 
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
     except Exception:
         app.logger.exception("Failed to export event history")
         return jsonify({"error": "Failed to export event history"}), 500
 
+
+# ==========================================
+# START SERVER
+# ==========================================
 
 if __name__ == "__main__":
     app.run(
