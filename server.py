@@ -359,12 +359,14 @@ def export_history_csv():
         for row in rows:
             writer.writerow([
                 row["id"],
-                row["created_at"].isoformat()
+                row["created_at"].strftime("%d/%m/%Y %I:%M:%S %p")
                 if row["created_at"] else "",
                 row["table_id"],
                 row["event"],
                 row["icon"] or "",
-                row["event_time"] or ""
+                datetime.strptime(
+                    str(row["event_time"]), "%H:%M:%S"
+                ).strftime("%I:%M:%S %p") if row["event_time"] else ""
             ])
 
         return Response(
