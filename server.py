@@ -344,8 +344,14 @@ def export_history_csv():
             ) as cur:
                 cur.execute(
                     """
-                    SELECT id, created_at, table_id, event,
-                           icon, event_time
+                    SELECT
+                        id,
+                        created_at AT TIME ZONE 'UTC'
+                            AT TIME ZONE 'Asia/Kolkata' AS created_at,
+                        table_id,
+                        event,
+                        icon,
+                        event_time
                     FROM logs
                     """
                     + where_clause
