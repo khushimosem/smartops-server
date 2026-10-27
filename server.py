@@ -371,7 +371,7 @@ def export_history_csv():
         for row in rows:
             writer.writerow([
                 row["id"],
-                row["created_at"].strftime("%d/%m/%Y %I:%M:%S %p")
+                row["created_at"].strftime("%d-%m-%Y, %I:%M:%S %p")
                 if row["created_at"] else "",
                 row["table_id"],
                 row["event"],
