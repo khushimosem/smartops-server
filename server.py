@@ -279,8 +279,14 @@ def get_history():
 
                 cur.execute(
                     """
-                    SELECT id, created_at, table_id, event,
-                           icon, event_time
+                    SELECT
+                        id,
+                        created_at AT TIME ZONE 'UTC'
+                            AT TIME ZONE 'Asia/Kolkata' AS created_at,
+                        table_id,
+                        event,
+                        icon,
+                        event_time
                     FROM logs
                     """
                     + where_clause
@@ -288,7 +294,7 @@ def get_history():
                     ORDER BY created_at DESC, id DESC
                     LIMIT %s OFFSET %s
                     """,
-                    params + [limit, offset]
+                    params + [limit, offset]    
                 )
                 rows = cur.fetchall()
 
