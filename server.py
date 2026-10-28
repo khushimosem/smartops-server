@@ -27,12 +27,17 @@ def get_db_connection():
 # HISTORY FILTERS
 # ==========================================
 
+
 def get_history_filters():
     conditions = []
     params = []
 
     table_id = request.args.get("table_id")
     event = request.args.get("event")
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    start_time = request.args.get("start_time")
+    end_time = request.args.get("end_time")
 
     if table_id:
         try:
@@ -46,6 +51,36 @@ def get_history_filters():
     if event:
         conditions.append("event = %s")
         params.append(event)
+
+    if start_date:
+        try:
+            start_value = f"{start_date} {start_time or '00:00'}"
+            datetime.strptime(start_value, "%Y-%m-%d %H:%M")
+        except ValueError:
+            raise ValueError("Invalid start date or time")
+
+        conditions.append("""
+            created_at >= (
+                (%s::timestamp AT TIME ZONE 'Asia/Kolkata')
+                AT TIME ZONE 'UTC'
+            )
+        """)
+        params.append(start_value)
+
+    if end_date:
+        try:
+            end_value = f"{end_date} {end_time or '23:59'}"
+            datetime.strptime(end_value, "%Y-%m-%d %H:%M")
+        except ValueError:
+            raise ValueError("Invalid end date or time")
+
+        conditions.append("""
+            created_at < (
+                ((%s::timestamp AT TIME ZONE 'Asia/Kolkata')
+                AT TIME ZONE 'UTC') + INTERVAL '1 minute'
+            )
+        """)
+        params.append(end_value)
 
     where_clause = (
         " WHERE " + " AND ".join(conditions)
