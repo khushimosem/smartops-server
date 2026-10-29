@@ -55,6 +55,12 @@ def get_history_filters():
     if start_date:
         try:
             start_value = f"{start_date} {start_time or '00:00'}"
+            start_value = (
+                f"{start_date} "
+                + datetime.strptime(
+                    start_time or "12:00 AM", "%I:%M %p"
+                ).strftime("%H:%M")
+            )
             datetime.strptime(start_value, "%Y-%m-%d %H:%M")
         except ValueError:
             raise ValueError("Invalid start date or time")
@@ -70,6 +76,12 @@ def get_history_filters():
     if end_date:
         try:
             end_value = f"{end_date} {end_time or '23:59'}"
+            end_value = (
+                f"{end_date} "
+                + datetime.strptime(
+                    end_time or "11:59 PM", "%I:%M %p"
+                ).strftime("%H:%M")
+            )
             datetime.strptime(end_value, "%Y-%m-%d %H:%M")
         except ValueError:
             raise ValueError("Invalid end date or time")
